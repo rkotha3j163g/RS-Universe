@@ -5,7 +5,7 @@ Mag 7 Stock Dashboard — powered by Alpaca Market Data API
 from flask import Flask, jsonify, render_template_string
 import requests
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 
@@ -53,24 +53,6 @@ def get_snapshots():
     return resp.json()
 
 
-def get_bars(symbol, days=30):
-    """Fetch daily bars for a symbol over the last N trading days."""
-    end   = datetime.now(timezone.utc)
-    # Use 2× calendar days as buffer to cover trading days + weekends/holidays
-    start = end - timedelta(days=days * 2)
-    url   = f"{DATA_BASE_URL}/v2/stocks/{symbol}/bars"
-    params = {
-        "timeframe": "1Day",
-        "start":     start.strftime("%Y-%m-%d"),
-        "end":       end.strftime("%Y-%m-%d"),
-        "limit":     days,
-        "feed":      "iex",
-    }
-    resp = requests.get(url, headers=HEADERS, params=params, timeout=10)
-    resp.raise_for_status()
-    bars = resp.json().get("bars", [])
-    return bars[-days:] if len(bars) > days else bars
-
 
 @app.route("/api/overview")
 def api_overview():
@@ -103,45 +85,6 @@ def api_overview():
     return jsonify(result)
 
 
-@app.route("/api/chart/<symbol>")
-def api_chart(symbol):
-    if symbol not in MAG7:
-        return jsonify({"error": "invalid symbol"}), 400
-    # Fetch 230 bars: 200 for MA calculation + 30 to display
-    bars = get_bars(symbol, days=230)
-    display_bars = bars[-30:] if len(bars) >= 30 else bars
-    dates  = [b["t"][:10] for b in display_bars]
-    closes = [round(b["c"], 2) for b in display_bars]
-    # Compute 200D MA for each displayed bar
-    all_closes = [b["c"] for b in bars]
-    n = len(bars)
-    display_start = n - len(display_bars)
-    ma200 = []
-    for i in range(display_start, n):
-        if i >= 199:
-            ma_val = round(sum(all_closes[i - 199:i + 1]) / 200, 2)
-        else:
-            ma_val = None
-        ma200.append(ma_val)
-    # normalise to % from first close
-    base = closes[0] if closes else 1
-    normed = [round((c - base) / base * 100, 2) for c in closes]
-    return jsonify({"dates": dates, "closes": closes, "normed": normed, "ma200": ma200})
-
-
-@app.route("/api/compare")
-def api_compare():
-    """Return 30-day normalised series for all Mag7 — for the compare chart."""
-    out = {}
-    for sym in MAG7:
-        bars = get_bars(sym, days=30)
-        dates  = [b["t"][:10] for b in bars]
-        closes = [round(b["c"], 2) for b in bars]
-        base   = closes[0] if closes else 1
-        normed = [round((c - base) / base * 100, 2) for c in closes]
-        out[sym] = {"dates": dates, "normed": normed, "color": COLORS[sym]}
-    return jsonify(out)
-
 
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -149,7 +92,6 @@ HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mag 7 Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -184,10 +126,10 @@ HTML = """<!DOCTYPE html>
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 16px; margin-bottom: 36px; }
   .card {
     background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-    padding: 18px 16px; cursor: pointer; transition: border-color .2s, transform .15s;
+    padding: 18px 16px; transition: border-color .2s, transform .15s;
     position: relative; overflow: hidden;
   }
-  .card:hover, .card.active { border-color: var(--accent); transform: translateY(-2px); }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
   .card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--accent); }
   .card .ticker { font-size: .75rem; font-weight: 700; color: var(--muted); letter-spacing: 1px; margin-bottom: 2px; }
   .card .company { font-size: .82rem; color: var(--muted); margin-bottom: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -199,17 +141,7 @@ HTML = """<!DOCTYPE html>
   .card .stat-label { font-size: .68rem; color: var(--muted); }
   .card .stat-value { font-size: .78rem; font-weight: 600; }
 
-  /* ── Chart section ──────────────────────────────────── */
-  .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-  @media (max-width: 800px) { .charts-row { grid-template-columns: 1fr; } }
-  .chart-box {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px;
-  }
-  .chart-box h3 { font-size: .9rem; color: var(--muted); margin-bottom: 14px; font-weight: 600; }
-  .chart-box h3 span { color: var(--text); }
-  canvas { width: 100% !important; }
-
-  .spinner { text-align: center; padding: 60px; color: var(--muted); font-size: 1rem; }
+.spinner { text-align: center; padding: 60px; color: var(--muted); font-size: 1rem; }
   .error-msg { color: var(--red); background: #300; border: 1px solid var(--red); border-radius: 8px; padding: 14px 18px; margin: 20px 0; font-size: .9rem; }
 </style>
 </head>
@@ -226,24 +158,9 @@ HTML = """<!DOCTYPE html>
 <main>
   <div id="error-box"></div>
   <div id="cards-container" class="cards"><div class="spinner">Fetching live data…</div></div>
-  <div class="charts-row">
-    <div class="chart-box">
-      <h3>Price — <span id="chart-title">select a stock</span></h3>
-      <canvas id="priceChart" height="220"></canvas>
-    </div>
-    <div class="chart-box">
-      <h3>30-Day Performance Comparison <span style="font-size:.75rem;color:var(--muted)">(% return, equal start)</span></h3>
-      <canvas id="compareChart" height="220"></canvas>
-    </div>
-  </div>
 </main>
 
 <script>
-let priceChart   = null;
-let compareChart = null;
-let activeSymbol = null;
-const COLORS = {{ colors | tojson }};
-
 function fmt(n)    { return n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}); }
 function fmtVol(v) { if(v>=1e9) return (v/1e9).toFixed(2)+'B'; if(v>=1e6) return (v/1e6).toFixed(2)+'M'; return v.toLocaleString(); }
 
@@ -260,7 +177,7 @@ function renderCards(stocks) {
     const arrow = up ? '▲' : '▼';
     const cls   = up ? 'up' : 'down';
     const div   = document.createElement('div');
-    div.className = 'card' + (activeSymbol === s.symbol ? ' active' : '');
+    div.className = 'card';
     div.style.setProperty('--accent', s.color);
     div.innerHTML = `
       <div class="ticker">${s.symbol}</div>
@@ -274,118 +191,7 @@ function renderCards(stocks) {
         <div class="stat-label">Vol</div>   <div class="stat-value">${fmtVol(s.volume)}</div>
         <div class="stat-label">VWAP</div>  <div class="stat-value">$${fmt(s.vwap)}</div>
       </div>`;
-    div.addEventListener('click', () => loadPriceChart(s.symbol, s.name, s.color));
     el.appendChild(div);
-  });
-}
-
-async function loadPriceChart(symbol, name, color) {
-  activeSymbol = symbol;
-  document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
-  const clicked = [...document.querySelectorAll('.card')].find(c => c.querySelector('.ticker')?.textContent === symbol);
-  if (clicked) clicked.classList.add('active');
-
-  document.getElementById('chart-title').textContent = name + ' (' + symbol + ')';
-  const res  = await fetch('/api/chart/' + symbol);
-  const data = await res.json();
-
-  if (priceChart) priceChart.destroy();
-  const ctx = document.getElementById('priceChart').getContext('2d');
-  const grad = ctx.createLinearGradient(0, 0, 0, 260);
-  grad.addColorStop(0, color + '55');
-  grad.addColorStop(1, color + '00');
-
-  priceChart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: data.dates,
-      datasets: [
-        {
-          label: 'Price',
-          data: data.closes,
-          borderColor: color,
-          backgroundColor: grad,
-          borderWidth: 2,
-          pointRadius: 0,
-          pointHoverRadius: 4,
-          fill: true,
-          tension: 0.3,
-        },
-        {
-          label: '200D MA',
-          data: data.ma200,
-          borderColor: '#f0a500',
-          backgroundColor: 'transparent',
-          borderWidth: 1.5,
-          borderDash: [5, 4],
-          pointRadius: 0,
-          pointHoverRadius: 0,
-          fill: false,
-          tension: 0.3,
-          spanGaps: false,
-        }
-      ]
-    },
-    options: {
-      responsive: true,
-      plugins: {
-        legend: {
-          display: true,
-          labels: { color: '#8b949e', boxWidth: 20, padding: 12, font: { size: 11 },
-            filter: item => item.datasetIndex === 1
-          }
-        },
-        tooltip: {
-          callbacks: {
-            label: ctx => {
-              if (ctx.datasetIndex === 1 && ctx.parsed.y === null) return null;
-              return ' ' + ctx.dataset.label + ': $' + fmt(ctx.parsed.y);
-            }
-          }
-        }
-      },
-      scales: {
-        x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e', maxTicksLimit: 6 } },
-        y: { grid: { color: '#30363d' }, ticks: { color: '#8b949e', callback: v => '$' + v } }
-      }
-    }
-  });
-}
-
-async function loadCompareChart() {
-  const res  = await fetch('/api/compare');
-  const data = await res.json();
-  const symbols = Object.keys(data);
-  const labels  = data[symbols[0]].dates;
-
-  if (compareChart) compareChart.destroy();
-  const ctx = document.getElementById('compareChart').getContext('2d');
-  compareChart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: symbols.map(sym => ({
-        label: sym,
-        data:  data[sym].normed,
-        borderColor:     data[sym].color,
-        backgroundColor: 'transparent',
-        borderWidth: 2,
-        pointRadius: 0,
-        pointHoverRadius: 4,
-        tension: 0.3,
-      }))
-    },
-    options: {
-      responsive: true,
-      plugins: {
-        legend: { labels: { color: '#e6edf3', boxWidth: 12, padding: 14, font: { size: 11 } } },
-        tooltip: { callbacks: { label: ctx => ' ' + ctx.dataset.label + ': ' + fmt(ctx.parsed.y) + '%' } }
-      },
-      scales: {
-        x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e', maxTicksLimit: 6 } },
-        y: { grid: { color: '#30363d' }, ticks: { color: '#8b949e', callback: v => v + '%' } }
-      }
-    }
   });
 }
 
@@ -397,14 +203,6 @@ async function loadAll() {
     const stocks = await res.json();
     renderCards(stocks);
     document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
-
-    // auto-select first card
-    if (!activeSymbol && stocks.length) {
-      const s = stocks[0];
-      loadPriceChart(s.symbol, s.name, s.color);
-    }
-
-    loadCompareChart();
   } catch(e) {
     showError('Could not fetch data. Check your Alpaca API keys and try again. (' + e.message + ')');
   }
