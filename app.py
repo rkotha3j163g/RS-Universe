@@ -54,9 +54,10 @@ def get_snapshots():
 
 
 def get_bars(symbol, days=30):
-    """Fetch daily bars for a symbol over the last N calendar days."""
+    """Fetch daily bars for a symbol over the last N trading days."""
     end   = datetime.now(timezone.utc)
-    start = end - timedelta(days=days + 10)   # buffer for weekends/holidays
+    # Use 2× calendar days as buffer to cover trading days + weekends/holidays
+    start = end - timedelta(days=days * 2)
     url   = f"{DATA_BASE_URL}/v2/stocks/{symbol}/bars"
     params = {
         "timeframe": "1Day",
@@ -106,13 +107,26 @@ def api_overview():
 def api_chart(symbol):
     if symbol not in MAG7:
         return jsonify({"error": "invalid symbol"}), 400
-    bars = get_bars(symbol, days=30)
-    dates  = [b["t"][:10] for b in bars]
-    closes = [round(b["c"], 2) for b in bars]
+    # Fetch 230 bars: 200 for MA calculation + 30 to display
+    bars = get_bars(symbol, days=230)
+    display_bars = bars[-30:] if len(bars) >= 30 else bars
+    dates  = [b["t"][:10] for b in display_bars]
+    closes = [round(b["c"], 2) for b in display_bars]
+    # Compute 200D MA for each displayed bar
+    all_closes = [b["c"] for b in bars]
+    n = len(bars)
+    display_start = n - len(display_bars)
+    ma200 = []
+    for i in range(display_start, n):
+        if i >= 199:
+            ma_val = round(sum(all_closes[i - 199:i + 1]) / 200, 2)
+        else:
+            ma_val = None
+        ma200.append(ma_val)
     # normalise to % from first close
     base = closes[0] if closes else 1
     normed = [round((c - base) / base * 100, 2) for c in closes]
-    return jsonify({"dates": dates, "closes": closes, "normed": normed})
+    return jsonify({"dates": dates, "closes": closes, "normed": normed, "ma200": ma200})
 
 
 @app.route("/api/compare")
@@ -285,22 +299,51 @@ async function loadPriceChart(symbol, name, color) {
     type: 'line',
     data: {
       labels: data.dates,
-      datasets: [{
-        data: data.closes,
-        borderColor: color,
-        backgroundColor: grad,
-        borderWidth: 2,
-        pointRadius: 0,
-        pointHoverRadius: 4,
-        fill: true,
-        tension: 0.3,
-      }]
+      datasets: [
+        {
+          label: 'Price',
+          data: data.closes,
+          borderColor: color,
+          backgroundColor: grad,
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          fill: true,
+          tension: 0.3,
+        },
+        {
+          label: '200D MA',
+          data: data.ma200,
+          borderColor: '#f0a500',
+          backgroundColor: 'transparent',
+          borderWidth: 1.5,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          pointHoverRadius: 0,
+          fill: false,
+          tension: 0.3,
+          spanGaps: false,
+        }
+      ]
     },
     options: {
       responsive: true,
-      plugins: { legend: { display: false }, tooltip: {
-        callbacks: { label: ctx => ' $' + fmt(ctx.parsed.y) }
-      }},
+      plugins: {
+        legend: {
+          display: true,
+          labels: { color: '#8b949e', boxWidth: 20, padding: 12, font: { size: 11 },
+            filter: item => item.datasetIndex === 1
+          }
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              if (ctx.datasetIndex === 1 && ctx.parsed.y === null) return null;
+              return ' ' + ctx.dataset.label + ': $' + fmt(ctx.parsed.y);
+            }
+          }
+        }
+      },
       scales: {
         x: { grid: { color: '#30363d' }, ticks: { color: '#8b949e', maxTicksLimit: 6 } },
         y: { grid: { color: '#30363d' }, ticks: { color: '#8b949e', callback: v => '$' + v } }
