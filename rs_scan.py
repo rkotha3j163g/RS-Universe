@@ -644,9 +644,9 @@ def main():
     # Terminal output
     print_results(results, args.top, spy_info)
 
-    # Save CSV
+    # Save CSV (top N only)
     csv_path = os.path.join(args.out_dir, f"rs_scan_{today}.csv")
-    results.to_csv(csv_path, index=False, float_format="%.2f")
+    results.head(args.top).to_csv(csv_path, index=False, float_format="%.2f")
     print(f"  CSV saved → {csv_path}")
 
     # HTML report
