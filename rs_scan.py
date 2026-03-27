@@ -22,7 +22,6 @@ Usage:
 """
 
 import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
 
 import matplotlib
 matplotlib.use("Agg")
@@ -42,11 +41,25 @@ import yfinance as yf
 import resend
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Configuration constants
+# ─────────────────────────────────────────────────────────────────────────────
+
+# RS score: weighted periods (trading days) and their multipliers
+# Recent 63-day period weighted 2x for recency bias (IBD convention)
+RS_WEIGHTS = [(63, 2), (126, 1), (189, 1), (252, 1)]
+
+# Window for RS line slope calculation (trading days)
+RS_SLOPE_DAYS = 20
+
+# Number of tickers per yfinance download batch
+DOWNLOAD_CHUNK = 100
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Email config
 # ─────────────────────────────────────────────────────────────────────────────
 resend.api_key = os.environ.get("RESEND_API_KEY", "")
-EMAIL_FROM = os.environ.get("EMAIL_FROM", "onboarding@resend.dev")
-EMAIL_TO   = os.environ.get("EMAIL_TO", "rksh64@gmail.com")
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
+EMAIL_TO   = os.environ.get("EMAIL_TO", "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,8 +170,7 @@ def download_prices(tickers: list, period: str = "1y") -> pd.DataFrame:
     """
     all_tickers = sorted(set(tickers + ["SPY"]))
     total = len(all_tickers)
-    CHUNK = 100
-    batches = [all_tickers[i:i+CHUNK] for i in range(0, total, CHUNK)]
+    batches = [all_tickers[i:i+DOWNLOAD_CHUNK] for i in range(0, total, DOWNLOAD_CHUNK)]
 
     print(f"\n  Downloading {total} tickers in {len(batches)} batches…")
     all_closes = {}
@@ -166,11 +178,17 @@ def download_prices(tickers: list, period: str = "1y") -> pd.DataFrame:
     for idx, batch in enumerate(batches, 1):
         print(f"  Batch {idx}/{len(batches)}  ({len(batch)} tickers)…", end=" ", flush=True)
         try:
-            raw = yf.download(
-                batch, period=period,
-                auto_adjust=True, progress=False,
-                group_by="ticker", threads=False,
-            )
+            # yfinance may fail cert verification on some runners; apply only here
+            _orig_ctx = ssl._create_default_https_context
+            ssl._create_default_https_context = ssl._create_unverified_context
+            try:
+                raw = yf.download(
+                    batch, period=period,
+                    auto_adjust=True, progress=False,
+                    group_by="ticker", threads=False,
+                )
+            finally:
+                ssl._create_default_https_context = _orig_ctx
             fetched = 0
             for ticker in batch:
                 try:
@@ -206,7 +224,8 @@ def rs_score(stock_series: pd.Series, spy_series: pd.Series) -> float:
     Weighted % change over 4 periods: last 63/126/189/252 trading days.
     Recent performance weighted 2x.
     """
-    if len(stock_series) < 63 or len(spy_series) < 63:
+    min_period = RS_WEIGHTS[0][0]
+    if len(stock_series) < min_period or len(spy_series) < min_period:
         return np.nan
 
     def pct(s, n):
@@ -221,11 +240,9 @@ def rs_score(stock_series: pd.Series, spy_series: pd.Series) -> float:
             return np.nan
         return sp - bp
 
-    # Weights: 63d × 2, 126d × 1, 189d × 1, 252d × 1
-    weights = [(63, 2), (126, 1), (189, 1), (252, 1)]
-    total_w = sum(w for _, w in weights)
+    total_w = sum(w for _, w in RS_WEIGHTS)
     score = 0.0
-    for n, w in weights:
+    for n, w in RS_WEIGHTS:
         r = rel(n)
         if np.isnan(r):
             r = 0.0
@@ -291,7 +308,7 @@ def scan(prices: pd.DataFrame, min_price: float = 5.0) -> pd.DataFrame:
             continue
 
         score      = rs_score(s, spy)
-        slope      = rs_line_slope(s, spy, days=20)
+        slope      = rs_line_slope(s, spy, days=RS_SLOPE_DAYS)
         dd         = pct_from_high(s)
         spy_delta  = dd - spy_dd          # positive = holding up better than SPY
         price      = round(s.iloc[-1], 2)
@@ -504,6 +521,10 @@ def make_rs_chart(df: pd.DataFrame, prices: pd.DataFrame, top_n: int, out_path: 
 
 def send_email(df: pd.DataFrame, top: int, spy_info: dict, html_path: str, chart_path: str):
     """Send the RS scan results via Resend with the HTML report inline and chart attached."""
+    if not EMAIL_FROM or not EMAIL_TO:
+        print("  Email skipped — EMAIL_FROM / EMAIL_TO not configured.")
+        return
+
     today     = datetime.now().strftime("%Y-%m-%d")
     spy_dd    = spy_info["drawdown"]
     spy_1m    = spy_info["chg_1m"]

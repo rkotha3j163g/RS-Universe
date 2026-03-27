@@ -28,8 +28,9 @@ jobs:
       - name: Run RS scan
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_FROM:     ${{ secrets.EMAIL_FROM }}
           EMAIL_TO:       ${{ secrets.EMAIL_TO }}
-        run: python rs_scan.py --universe all --top 30 --min-price 10 --no-chart --no-email
+        run: python rs_scan.py --universe all --top 30 --min-price 10 --no-chart
 
       - name: Upload CSV to dashboard
         run: |

@@ -5,9 +5,11 @@ Displays results from a locally-run rs_scan.py CSV upload.
 No scanning happens on this server — just reads uploaded data.
 """
 
+import hmac
 import io
 import os
 import json
+import tempfile
 from datetime import datetime
 
 import pandas as pd
@@ -29,13 +31,23 @@ def _load_store():
         return {"uploaded_at": None, "filename": None, "rows": []}
 
 def _save_store(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f)
+    # Write to a temp file then rename for crash safety
+    dir_name = os.path.dirname(DATA_FILE)
+    with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, suffix=".tmp") as tmp:
+        json.dump(data, tmp)
+        tmp_path = tmp.name
+    os.replace(tmp_path, DATA_FILE)
 
+
+REQUIRED_COLUMNS = {"Ticker", "Price", "RS_Score", "RS_Rank"}
 
 def parse_csv(fileobj):
     df = pd.read_csv(fileobj)
     df.columns = [c.strip() for c in df.columns]
+
+    missing = REQUIRED_COLUMNS - set(df.columns)
+    if missing:
+        raise ValueError(f"CSV missing required columns: {sorted(missing)}")
 
     # normalise column names from rs_scan.py output
     rename = {
@@ -79,19 +91,26 @@ def upload():
         request.form.get("token", "")
         or request.headers.get("X-Upload-Token", "")
     )
-    if UPLOAD_TOKEN and token != UPLOAD_TOKEN:
+    if UPLOAD_TOKEN and not hmac.compare_digest(token, UPLOAD_TOKEN):
         return "Unauthorized", 401
+
+    MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 
     file = request.files.get("file")
     if file is None:
         # try raw body (curl --data-binary)
-        raw = request.get_data()
+        raw = request.get_data(as_text=False)
         if not raw:
             return "No file provided", 400
+        if len(raw) > MAX_BYTES:
+            return "File too large (max 5 MB)", 413
         fileobj = io.StringIO(raw.decode("utf-8"))
         filename = "upload.csv"
     else:
-        fileobj = io.StringIO(file.stream.read().decode("utf-8"))
+        raw = file.stream.read()
+        if len(raw) > MAX_BYTES:
+            return "File too large (max 5 MB)", 413
+        fileobj = io.StringIO(raw.decode("utf-8"))
         filename = file.filename
 
     try:
