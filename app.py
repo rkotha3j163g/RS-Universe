@@ -16,14 +16,21 @@ from flask import Flask, jsonify, request, redirect, url_for
 app = Flask(__name__)
 
 UPLOAD_TOKEN = os.environ.get("UPLOAD_TOKEN", "")   # set in Railway env vars
+DATA_FILE    = os.path.join(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "/tmp"), "rs_data.json")
 
-# ── In-memory store ───────────────────────────────────────────────────────────
 
-_store = {
-    "uploaded_at": None,
-    "filename":    None,
-    "rows":        [],   # list of dicts (all ranked rows)
-}
+# ── Persistent store (JSON file) ──────────────────────────────────────────────
+
+def _load_store():
+    try:
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {"uploaded_at": None, "filename": None, "rows": []}
+
+def _save_store(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f)
 
 
 def parse_csv(fileobj):
@@ -92,9 +99,8 @@ def upload():
     except Exception as e:
         return f"Could not parse CSV: {e}", 400
 
-    _store["rows"]        = rows
-    _store["uploaded_at"] = datetime.now().isoformat()
-    _store["filename"]    = filename
+    data = {"rows": rows, "uploaded_at": datetime.now().isoformat(), "filename": filename}
+    _save_store(data)
 
     # return JSON for curl, redirect for browser
     if request.accept_mimetypes.best == "application/json" or not file:
@@ -104,7 +110,7 @@ def upload():
 
 @app.route("/api/data")
 def api_data():
-    return jsonify(_store)
+    return jsonify(_load_store())
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
